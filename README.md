@@ -2,7 +2,7 @@
 
 ## 访问数：![hello](https://views.whatilearened.today/views/github/sirpdboy/deplives.svg)[![](https://img.shields.io/badge/TG群-点击加入-FFFFFF.svg)](https://t.me/joinchat/AAAAAEpRF88NfOK5vBXGBQ)
 
-[eqosplus  定时限速插件](https://github.com/sirpdboy/luci-app-timecontrol)
+[timecontrol  上网时间控制插件](https://github.com/sirpdboy/luci-app-timecontrol)
 
 ![screenshots](https://raw.githubusercontent.com/sirpdboy/openwrt/master/doc/说明1.jpg)
 
