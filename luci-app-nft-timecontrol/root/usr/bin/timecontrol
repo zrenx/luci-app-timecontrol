@@ -65,15 +65,13 @@ get_target_info() {
 }
 
 stop_timecontrol() {
-    nft delete set ip filter blacklist_list  2>/dev/null
-    nft delete set ip6 filter blacklist_list 2>/dev/null
-    nft delete set bridge filter blacklist_list 2>/dev/null
-    nft delete set ip filter blacklist_list 2>/dev/null
-    nft delete set ip6 filter blacklist_list 2>/dev/null
-    nft delete set bridge filter blacklist_list 2>/dev/null
-    nft delete table ip filter 2>/dev/null
-    nft delete table ip6 filter 2>/dev/null
-    nft delete table bridge filter 2>/dev/null
+    for chain in "ip" "bridge" "ip6" ; do
+ 	dbg_nft delete set $chain filter blacklist_list  2>/dev/null 
+ 	dbg_nft delete set $chain filter whitelist_list  2>/dev/null 
+ 	dbg_nft delete set $chain filter blacklist_list 2>/dev/null
+ 	dbg_nft delete set $chain filter whitelist_list 2>/dev/null
+ 	dbg_nft delete table $chain filter 2>/dev/null
+    done
     dbg_nft flush ruleset
     echolog "All nftables rules have been cleared."
     /etc/init.d/firewall restart
@@ -81,14 +79,23 @@ stop_timecontrol() {
 }
 
 init_timecontrol() {
-dbg_nft  add table ip filter 2>/dev/null
-dbg_nft  add table ip6 filter 2>/dev/null
-dbg_nft  add table bridge filter 2>/dev/null
+     for chain in "ip" "bridge" "ip6" ; do
+	 case $chain in
+  	  ip)
+  	      addr_type="ipv4_addr"
+  	      ;;
+  	  ip6)
+  	      addr_type="ipv6_addr"
+  	      ;;
+    	bridge)
+        	addr_type="ether_addr"
+        	;;
+	esac
+	dbg_nft  add table $chain filter 2>/dev/null
+ 	dbg_nft  add set $chain filter ${list_type}_list { type $addr_type \; } 2>/dev/null
+     done
 
-dbg_nft  add set ip filter blacklist_list { type ipv4_addr \; } 2>/dev/null
-dbg_nft  add set ip filter whitelist_list { type ipv4_addr \; } 2>/dev/null
-dbg_nft  add set bridge filter blacklist_list { type ether_addr \; } 2>/dev/null
-dbg_nft  add set bridge filter whitelist_list { type ether_addr \; } 2>/dev/null
+
 }
 
 timedel() {
@@ -96,7 +103,7 @@ timedel() {
     local target_info=$(get_target_info "$(config_t_get device mac )")
     if [ $? -eq 0 ]; then
         read -r table addr_type target <<< "$target_info"
-        [ "${DEBUG:-0}" -eq 0 ] || echo "D: timedel $@  --target:$target --table:$table --list_type:$list_type"
+
         dbg_nft delete element "$table" filter "${list_type}_list" { "$target" } 2>/dev/null
     fi
 }
@@ -123,9 +130,6 @@ timeadd() {
     	*)
         	;;
 	esac
-        [ "${DEBUG:-0}" -eq 0 ] || echo "D: timeadd $@  --target:$target --table:$table --addr_type:$addr_type  --daddr:$daddr --list_type:$list_type"
-
-        dbg_nft add set $table filter "${list_type}_list" { type "$addr_type" \; } 2>/dev/null
 	dbg_nft add element "$table" filter "${list_type}_list" { "$target" }
 
         if [ "$list_type" = "blacklist" ]; then
@@ -179,7 +183,7 @@ LOG_FILE="/var/log/$NAME.log"
 list_type=$(config_t_get $NAME list_type  )
 CHAIN=$( config_t_get $NAME chain )
 bin_nft=$(which nft)
-DEBUG=1
+DEBUG=0
 
 case "$crrun" in
     "stop")
