@@ -100,7 +100,7 @@ init_timecontrol() {
 
 timedel() {
     local id=$1
-    local target_info=$(get_target_info "$(config_t_get device mac )")
+    local target_info=$(get_target_info "$(config_t_get device mac 0 $id)")
     if [ $? -eq 0 ]; then
         read -r table addr_type target <<< "$target_info"
 
@@ -110,7 +110,7 @@ timedel() {
 
 timeadd() {
     local id=$1
-    local target_info=$(get_target_info "$(config_t_get device mac)")
+    local target_info=$(get_target_info "$(config_t_get device mac 0 $id)")
 
     if [ $? -eq 0 ]; then
         read -r table addr_type target <<< "$target_info"
@@ -150,11 +150,11 @@ timeadd() {
 }
 
 check_list() {
- local i=$1
+    local id=$1
     local checkid='0'
-    local start_time=$(config_t_get device timestart 2>/dev/null)
-    local end_time=$(config_t_get device timeend 2>/dev/null)
-    local wweek=$(config_t_get device week)
+    local start_time=$(config_t_get device timestart 0 $id 2>/dev/null)
+    local end_time=$(config_t_get device timeend 0 $id 2>/dev/null)
+    local wweek=$(config_t_get device week 0 $id)
     local current_time=$(date +%H:%M)
     local current_weekday=$(date +%u)
 
@@ -162,7 +162,7 @@ check_list() {
         if [[ "$start_time" < "$end_time" ]]; then
             [[ "$current_time" > "$start_time" ]] && [[ "$current_time" < "$end_time" ]] || return 1
         else
-            [[ "$current_time" < "$start_time" ]] && [[ "$current_time" > "$end_time" ]] || return 1
+            [[ "$current_time" > "$start_time" ]] || [[ "$current_time" < "$end_time" ]] || return 1
         fi
     fi
 
