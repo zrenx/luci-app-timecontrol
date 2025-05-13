@@ -158,9 +158,9 @@ check_list() {
 
     if [ "$start_time" != "$end_time" ]; then
         if [[ "$start_time" < "$end_time" ]]; then
-            [[ "$current_time" > "$start_time" ]] && [[ "$current_time" < "$end_time" ]] || return 1
+            [[ "$current_time" < "$start_time" ]] || [[ "$current_time" > "$end_time" ]] && return 1
         else
-            [[ "$current_time" > "$start_time" ]] || [[ "$current_time" < "$end_time" ]] || return 1
+            [[ "$current_time" < "$start_time" ]] && [[ "$current_time" > "$end_time" ]] && return 1
         fi
     fi
 
