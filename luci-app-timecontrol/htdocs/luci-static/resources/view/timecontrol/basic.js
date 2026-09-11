@@ -212,6 +212,8 @@ return view.extend({
         
         o = s.option(form.Value, 'mac', _('IP/MAC Address'));
         o.rmempty = false;
+        o.placeholder = _('e.g. 192.168.1.100 or 00:11:22:33:44:55 or AA:BB:CC:*:*:*');
+        o.description = _('MAC地址支持用 * 通配整个字节（如 AA:BB:CC:*:*:*），通配符仅在 nftables 固件下生效');
         if (hosts) {
             var hostOptions = {};
             

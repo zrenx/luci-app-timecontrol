@@ -287,7 +287,7 @@ update_device_status() {
         current_blocked=1
     fi
     
-    dbg "设备状态: $target, 应该允许=$should_allow, 当前阻止=$current_blocked"
+    dbg "设备状态: $target, 应该阻止=$should_allow, 当前阻止=$current_blocked"
     
     if [ "$should_allow" -eq 0 ]; then
         # 应该允许

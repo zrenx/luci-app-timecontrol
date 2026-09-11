@@ -93,7 +93,27 @@ parse_target() {
     elif echo "$target" | grep -qE '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
         echo "mac:single:$(echo "$target" | tr '[:upper:]' '[:lower:]')"
         return 0
-    
+
+    # 通配符MAC地址（用 * 通配整个字节，如 AA:BB:CC:*:*:*）
+    elif echo "$target" | grep -qE '^(([0-9A-Fa-f]{2}|\*):){5}([0-9A-Fa-f]{2}|\*)$' \
+        && echo "$target" | grep -q '\*'; then
+        local octs i b base="" mask=""
+        IFS=':' read -ra octs <<< "$target"
+        for ((i=0; i<6; i++)); do
+            if [ "${octs[$i]}" = "*" ]; then
+                b=00; m=00
+            else
+                b="$(echo "${octs[$i]}" | tr '[:upper:]' '[:lower:]')"; m=ff
+            fi
+            [ -n "$base" ] && { base="$base:"; mask="$mask:"; }
+            base="$base$b"
+            mask="$mask$m"
+        done
+        # 全部字节为*时掩码不含ff，等同于阻断所有设备，拒绝此配置
+        case "$mask" in
+            *ff*) echo "mac:wildcard:$base/$mask"; return 0 ;;
+        esac
+
     # IPv6地址
     elif echo "$target" | grep -qE '^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'; then
         echo "ipv6:single:$target"
@@ -113,6 +133,16 @@ parse_target() {
     return 1
 }
 
+# 解析 parse_target 的输出（值中允许含 ':'，如 MAC base/mask）
+# 结果写入全局变量 PT_TYPE / PT_SUBTYPE / PT_VALUE
+parse_parts() {
+    local result="$1"
+    PT_TYPE="${result%%:*}"
+    local rest="${result#*:}"
+    PT_SUBTYPE="${rest%%:*}"
+    PT_VALUE="${rest#*:}"
+}
+
 # 清理现有连接
 flush_connections() {
     local target="$1"
@@ -128,22 +158,27 @@ flush_connections() {
         return
     }
     
-    IFS=':' read -r type subtype value <<< "$parsed_result"
-    
-    dbg "清理连接: type=$type, value=$value"
-    
-    case "$type" in
+    parse_parts "$parsed_result"
+
+    dbg "清理连接: type=$PT_TYPE, value=$PT_VALUE"
+
+    case "$PT_TYPE" in
         "ipv4")
-            $bin_conntrack -D -s "$value" 2>/dev/null && dbg "清理源连接: $value"
-            $bin_conntrack -D -d "$value" 2>/dev/null && dbg "清理目标连接: $value"
+            $bin_conntrack -D -s "$PT_VALUE" 2>/dev/null && dbg "清理源连接: $PT_VALUE"
+            $bin_conntrack -D -d "$PT_VALUE" 2>/dev/null && dbg "清理目标连接: $PT_VALUE"
             ;;
         "mac")
+            # 通配符MAC无法对应单一IP，跳过
+            [ "$PT_SUBTYPE" = "wildcard" ] && {
+                dbg "通配符MAC跳过连接清理: $PT_VALUE"
+                return
+            }
             # MAC地址需要先转换为IP
             if [ -f "/proc/net/arp" ]; then
-                local ip_addr=$(grep -i "$value" /proc/net/arp 2>/dev/null | awk '{print $1}' | head -1)
+                local ip_addr=$(grep -i "$PT_VALUE" /proc/net/arp 2>/dev/null | awk '{print $1}' | head -1)
                 if [ -n "$ip_addr" ]; then
-                    $bin_conntrack -D -s "$ip_addr" 2>/dev/null && dbg "清理MAC源连接: $value -> $ip_addr"
-                    $bin_conntrack -D -d "$ip_addr" 2>/dev/null && dbg "清理MAC目标连接: $value -> $ip_addr"
+                    $bin_conntrack -D -s "$ip_addr" 2>/dev/null && dbg "清理MAC源连接: $PT_VALUE -> $ip_addr"
+                    $bin_conntrack -D -d "$ip_addr" 2>/dev/null && dbg "清理MAC目标连接: $PT_VALUE -> $ip_addr"
                 fi
             fi
             ;;
@@ -272,6 +307,32 @@ stop_firewall() {
     rm -f "$IDLIST"
 }
 
+# 删除指定设备ID对应的通配符MAC规则（按 comment 查找 handle 删除）
+del_wild_mac() {
+    local id="$1" chain h
+    for chain in forward $( [ "$StrongCHAIN" -eq 1 ] && echo input ); do
+        for h in $(nft -a list chain inet timecontrol "$chain" 2>/dev/null \
+                   | grep "comment \"tc-wild-$id\"" \
+                   | grep -oE 'handle [0-9]+' | cut -d' ' -f2); do
+            nft delete rule inet timecontrol "$chain" handle "$h" 2>/dev/null
+            dbg "已删除通配符MAC规则 ($chain) handle=$h"
+        done
+    done
+}
+
+# 通配符MAC不能放入set，用位运算规则下发（comment 携带设备ID）
+# 参数: id base mask
+add_wild_mac() {
+    local id="$1" base="$2" mask="$3" chain
+    del_wild_mac "$id"
+    for chain in forward $( [ "$StrongCHAIN" -eq 1 ] && echo input ); do
+        nft add rule inet timecontrol "$chain" \
+            ether saddr '&' "$mask" == "$base" drop \
+            comment "tc-wild-$id" 2>&1 | while read line; do dbg "nft: $line"; done
+        dbg "已添加通配符MAC规则 ($chain): $base / $mask"
+    done
+}
+
 # 添加设备到防火墙
 add_device() {
     local id="$1"
@@ -280,82 +341,100 @@ add_device() {
         dbg "添加设备失败: ID $id 的目标地址为空"
         return
     }
-    
+
     local comment=$(config_t_get device comment "$id" "设备$id")
     info "添加设备到防火墙: $comment ($target)"
-    
+
     local parsed_result=$(parse_target "$target")
     if [ $? -ne 0 ]; then
         info "添加失败: 无法解析地址 $target"
         return
     fi
-    
-    IFS=':' read -r type subtype value <<< "$parsed_result"
-    dbg "解析结果: type=$type, subtype=$subtype, value=$value"
-    
+
+    parse_parts "$parsed_result"
+    dbg "解析结果: type=$PT_TYPE, subtype=$PT_SUBTYPE, value=$PT_VALUE"
+
     if [ -n "$nftables_ver" ]; then
         # nftables处理
-        case "$type" in
+        case "$PT_TYPE" in
             "ipv4")
-                nft add element inet timecontrol blacklist "{ $value }" 2>&1 | while read line; do dbg "nft: $line"; done
-                dbg "已添加到nftables黑名单(IPv4): $value"
+                nft add element inet timecontrol blacklist "{ $PT_VALUE }" 2>&1 | while read line; do dbg "nft: $line"; done
+                dbg "已添加到nftables黑名单(IPv4): $PT_VALUE"
                 ;;
             "ipv6")
-                nft add element inet timecontrol blacklist6 "{ $value }" 2>&1 | while read line; do dbg "nft: $line"; done
-                dbg "已添加到nftables黑名单(IPv6): $value"
+                nft add element inet timecontrol blacklist6 "{ $PT_VALUE }" 2>&1 | while read line; do dbg "nft: $line"; done
+                dbg "已添加到nftables黑名单(IPv6): $PT_VALUE"
                 ;;
             "mac")
-                nft add element inet timecontrol blacklist_mac "{ $value }" 2>&1 | while read line; do dbg "nft: $line"; done
-                dbg "已添加到nftables黑名单(MAC): $value"
+                if [ "$PT_SUBTYPE" = "wildcard" ]; then
+                    add_wild_mac "$id" "${PT_VALUE%/*}" "${PT_VALUE#*/}"
+                else
+                    nft add element inet timecontrol blacklist_mac "{ $PT_VALUE }" 2>&1 | while read line; do dbg "nft: $line"; done
+                    dbg "已添加到nftables黑名单(MAC): $PT_VALUE"
+                fi
                 ;;
         esac
-        
+
     elif [ -n "$iptables_ver" ]; then
         # iptables处理
-        case "$type" in
+        case "$PT_TYPE" in
             "ipv4")
-                ipset add timecontrol_blacklist "$value" 2>&1 | while read line; do dbg "ipset: $line"; done
-                dbg "已添加到ipset黑名单(IPv4): $value"
+                ipset add timecontrol_blacklist "$PT_VALUE" 2>&1 | while read line; do dbg "ipset: $line"; done
+                dbg "已添加到ipset黑名单(IPv4): $PT_VALUE"
                 ;;
             "ipv6")
-                ipset add timecontrol_blacklist6 "$value" 2>&1 | while read line; do dbg "ipset: $line"; done
-                dbg "已添加到ipset黑名单(IPv6): $value"
+                ipset add timecontrol_blacklist6 "$PT_VALUE" 2>&1 | while read line; do dbg "ipset: $line"; done
+                dbg "已添加到ipset黑名单(IPv6): $PT_VALUE"
                 ;;
             "mac")
-                # iptables不支持MAC地址直接过滤，记录日志
+                # iptables不支持MAC地址直接过滤（含通配符MAC），记录日志
                 info "警告: iptables不支持MAC地址过滤，设备 $target 可能无法被阻止"
                 ;;
         esac
     fi
-    
+
     # 强控制模式清理连接
     if [ "$StrongCHAIN" -eq 1 ]; then
         dbg "强控制模式，清理现有连接"
         flush_connections "$target"
     fi
-    
+
     # 验证规则
-    verify_firewall_rule "$target"
+    verify_firewall_rule "$id" "$target"
 }
 
 # 验证防火墙规则
+# 参数: id target
 verify_firewall_rule() {
-    local target="$1"
-    
+    local id="$1"
+    local target="$2"
+
     dbg "验证防火墙规则: $target"
-    
+
+    local parsed_result=$(parse_target "$target")
+    [ $? -eq 0 ] || return 1
+    parse_parts "$parsed_result"
+
     if [ -n "$nftables_ver" ]; then
-        nft list table inet timecontrol 2>/dev/null | grep -q "$target" && {
-            dbg "验证成功: $target 在nftables规则中"
-            return 0
-        }
+        # 通配符MAC按comment验证
+        if [ "$PT_TYPE" = "mac" ] && [ "$PT_SUBTYPE" = "wildcard" ]; then
+            nft list table inet timecontrol 2>/dev/null | grep -qF "comment \"tc-wild-$id\"" && {
+                dbg "验证成功: 通配符MAC规则 tc-wild-$id 存在"
+                return 0
+            }
+        else
+            nft list table inet timecontrol 2>/dev/null | grep -qF "$target" && {
+                dbg "验证成功: $target 在nftables规则中"
+                return 0
+            }
+        fi
     elif [ -n "$iptables_ver" ]; then
         ipset test timecontrol_blacklist "$target" 2>/dev/null && {
             dbg "验证成功: $target 在ipset中"
             return 0
         }
     fi
-    
+
     dbg "验证失败: $target 不在防火墙规则中"
     return 1
 }
@@ -377,34 +456,39 @@ del_device() {
         info "移除失败: 无法解析地址 $target"
         return
     }
-    
-    IFS=':' read -r type subtype value <<< "$parsed_result"
-    
+
+    parse_parts "$parsed_result"
+
     if [ -n "$nftables_ver" ]; then
-        case "$type" in
+        case "$PT_TYPE" in
             "ipv4")
-                nft delete element inet timecontrol blacklist "{ $value }" 2>/dev/null
-                dbg "已从nftables移除(IPv4): $value"
+                nft delete element inet timecontrol blacklist "{ $PT_VALUE }" 2>/dev/null
+                dbg "已从nftables移除(IPv4): $PT_VALUE"
                 ;;
             "ipv6")
-                nft delete element inet timecontrol blacklist6 "{ $value }" 2>/dev/null
-                dbg "已从nftables移除(IPv6): $value"
+                nft delete element inet timecontrol blacklist6 "{ $PT_VALUE }" 2>/dev/null
+                dbg "已从nftables移除(IPv6): $PT_VALUE"
                 ;;
             "mac")
-                nft delete element inet timecontrol blacklist_mac "{ $value }" 2>/dev/null
-                dbg "已从nftables移除(MAC): $value"
+                if [ "$PT_SUBTYPE" = "wildcard" ]; then
+                    del_wild_mac "$id"
+                    dbg "已从nftables移除通配符MAC: $PT_VALUE"
+                else
+                    nft delete element inet timecontrol blacklist_mac "{ $PT_VALUE }" 2>/dev/null
+                    dbg "已从nftables移除(MAC): $PT_VALUE"
+                fi
                 ;;
         esac
-        
+
     elif [ -n "$iptables_ver" ]; then
-        case "$type" in
+        case "$PT_TYPE" in
             "ipv4")
-                ipset del timecontrol_blacklist "$value" 2>/dev/null
-                dbg "已从ipset移除(IPv4): $value"
+                ipset del timecontrol_blacklist "$PT_VALUE" 2>/dev/null
+                dbg "已从ipset移除(IPv4): $PT_VALUE"
                 ;;
             "ipv6")
-                ipset del timecontrol_blacklist6 "$value" 2>/dev/null
-                dbg "已从ipset移除(IPv6): $value"
+                ipset del timecontrol_blacklist6 "$PT_VALUE" 2>/dev/null
+                dbg "已从ipset移除(IPv6): $PT_VALUE"
                 ;;
         esac
     fi
@@ -553,7 +637,7 @@ case "$crrun" in
     "test")
         # 测试地址解析
         echo "测试地址解析:"
-        for test in "192.168.1.100" "192.168.1.0/24" "00:11:22:33:44:55" "invalid"; do
+        for test in "192.168.1.100" "192.168.1.0/24" "00:11:22:33:44:55" "AA:BB:CC:*:*:*" "invalid"; do
             echo -n "$test: "
             if parse_target "$test" >/dev/null; then
                 echo "✓ 有效"
