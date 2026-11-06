@@ -1,0 +1,34 @@
+name: Build OpenWrt 25.12 x86_64 APK
+
+on:
+  push:
+    branches:
+      - build/openwrt-25.12-x86_64
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build x86_64-openwrt-25.12
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build packages
+        uses: sirpdboy/gh-action-sdk@main
+        env:
+          ARCH: x86_64-openwrt-25.12
+          FEEDNAME: packages_ci
+          PACKAGES: luci-app-timecontrol
+          NO_REFRESH_CHECK: true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-timecontrol-openwrt-25.12-x86_64
+          path: |
+            bin/packages/**/packages_ci/*.apk
+            bin/packages/**/packages_ci/*.ipk
+          if-no-files-found: error
